@@ -1,0 +1,5 @@
+config.json
+decisions.log
+.bak*
+*.log
+.DS_Store
