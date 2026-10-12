@@ -34,6 +34,9 @@ const DEFAULT_CONFIG = {
   thresholds: { sonnet: 20, opus: 45, fable: 85 },
   margin: 10, // smart mode: min distance from the nearest threshold to skip the question
   minChars: 25,
+  // Mid-task: if this session ran a prompt within this many minutes, don't offer a cheaper
+  // model (a cold subagent re-reads context the session already has). Upgrades still ask. 0 = off.
+  midTaskMinutes: 30,
   useLLMClassifier: true, // uses Haiku when ANTHROPIC_API_KEY is set
   classifierModel: 'claude-haiku-4-5-20251001',
 };
@@ -256,6 +259,15 @@ function escalationOf(session, prompt, entries) {
   return pick ? { escalation: true, prevPicked: pick.picked } : {};
 }
 
+const tierIndex = key => TIERS.findIndex(t => t.key === key);
+// True when this session logged anything (prompt, skip, or pick) within cfg.midTaskMinutes.
+function isMidTask(session, cfg) {
+  const mins = Number(cfg.midTaskMinutes) || 0;
+  if (!session || mins <= 0) return false;
+  const last = [...readLog()].reverse().find(e => e.session === session);
+  return !!last && Date.now() - Date.parse(last.t) < mins * 60 * 1000;
+}
+
 // `route` is 'auto' (no question) or 'ask'; smart mode picks one per prompt.
 function routingInstructions(rec, cur, verdict, route, forced, note) {
   const curLabel = cur ? cur.label : 'the current model';
@@ -327,6 +339,12 @@ async function runHook() {
   }
   const entry = { session: data.session_id, current: cur?.key, rec: rec.key, score: verdict.score, source: verdict.source, mode: cfg.mode, prompt: prompt.slice(0, 120) };
   Object.assign(entry, escalationOf(data.session_id, prompt, readLog()));
+
+  // Mid-task downgrade: handing a follow-up to a cheaper cold subagent costs more than it saves.
+  if (!forcedMatch && cur && isMidTask(data.session_id, cfg) && tierIndex(rec.key) < tierIndex(cur.key)) {
+    log({ ...entry, skipped: 'mid-task' });
+    return;
+  }
 
   // Claude would just do it anyway, so a question is pure friction. (sm: tags still win.)
   if (!forcedMatch && cur && cur.key === rec.key) {

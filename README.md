@@ -44,6 +44,7 @@ Set with `/smartmodel mode <name>`.
 Nothing is injected (and the decision is logged as skipped) when:
 
 - the recommended model is the one you are already on;
+- you are mid-task (this session ran a prompt in the last 30 minutes) and the recommendation is cheaper than your current model, since a cold subagent re-reads context the session already has; upgrades still ask. Set `midTaskMinutes` in `config.json` (0 turns it off);
 - the prompt is a short conversational question with no imperative verb ("what would a next step be?");
 - the message has no task, such as a thanks or acknowledgment;
 - the prompt is under 25 characters, a slash command, or a bare "yes" / "go ahead";
