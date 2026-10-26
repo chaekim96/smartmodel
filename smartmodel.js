@@ -70,22 +70,35 @@ const SIGNALS = [
   // [regex, points, reason]
   [/\b(architect(ure)?|system design|design (a|the) system)\b/i, 30, 'architecture'],
   [/\b(from scratch|greenfield|(build|make|create) (me )?(an?|the) ([\w-]+ ){0,3}(app|tool|service|platform|site|website|mod|plugin|extension|cli|game|agent|bot|dashboard|system))\b/i, 25, 'new build'],
-  [/\b(research|investigate|compare (options|approaches)|trade-?offs?|evaluate)\b/i, 18, 'research / tradeoffs'],
+  [/\b(research|investigate|compare (options|approaches)|compare [^.]{0,40}\bvs\.?|trade-?offs?)\b/i, 18, 'research / tradeoffs'],
+  [/\b(evaluate|grade|assess|analy[sz]e)\b/i, 6, 'evaluate / analyze'], // judging fit or a page, not deep research (was +18 with research)
   [/\b(refactor|migrat(e|ion)|rewrite|port (it|this|to))\b/i, 20, 'refactor / migration'],
-  [/\b(entire|whole|across the|every file|all (the )?files|codebase|repo-?wide|end[- ]to[- ]end)\b/i, 18, 'wide scope'],
+  [/\b(entire|whole|across (the|my|all)|every file|all (the )?files|codebase|repo-?wide|end[- ]to[- ]end)\b/i, 18, 'wide scope'],
   [/\b(debug|race condition|deadlock|memory leak|flaky|intermittent|root cause|segfault|why (does|is) .* (fail|break))\b/i, 24, 'debugging'],
-  [/\b(security|vulnerab|auth(entication|orization)?|encrypt|concurren|distributed|scal(e|ability)|performance|optimi[sz]e)\b/i, 14, 'high-stakes domain'],
+  [/\b(security|vulnab|auth(entication|orization)?|encrypt|concurren|distributed|scal(e|ability)|performance|optimi[sz]e)\b/i, 14, 'high-stakes domain'],
   [/\b(implement|feature|integrat(e|ion)|api|endpoint|database|schema|pipeline|deploy)\b/i, 10, 'implementation'],
   [/\b(algorithm|prove|proof|complexity|math|model training|fine-?tune)\b/i, 14, 'hard reasoning'],
   [/\b(plan|roadmap|spec|requirements|strategy)\b/i, 8, 'planning'],
+  [/\b(audit|assess(ment)?|critique|code review)\b/i, 8, 'audit / review'],
   [/\b(write|add|create|make|build|fix|update|change)\b/i, 6, 'makes changes'],
+  // writing / career work is quality-sensitive (and `heuristic` floors it at Sonnet), and
+  // links mean fetching and reading pages: both need more than a cold Haiku.
+  [/\b(cover letter|r[eé]sum[eé]|cv|essay|memo|e-?mail|draft|bullets?|linkedin|pitch|case stud(y|ies)|referrals?|outreach|recruiter|tagline)\b/i, 5, 'writing / career'],
+  [/https?:\/\/\S+/i, 3, 'url / external page'],
   // cheap signals
   [/\b(typo|spelling|rename|reformat|format|lint|indent|whitespace|comment out)\b/i, -18, 'cosmetic edit'],
-  [/\b(git (status|log|diff|add|commit|push|pull)|commit (this|it|these)|push (it|this))\b/i, -16, 'git chore'],
-  [/\b(what is|what's|where is|which file|list|show me|print|cat|ls|find the)\b/i, -10, 'lookup'],
-  [/\b(quick(ly)?|simple|small|tiny|just|one-?liner|minor|only)\b/i, -10, 'self-described small'],
+  [/\b(git (status|log|diff|add|commit|push|pull)|commit (this|it|these)|push (it|this)|(sync|merge|rebase)\b[^.]{0,30}\b(main|master|origin))\b/i, -16, 'git chore'],
+  [/\b(what is|what's|where is|which file|print|cat|ls|find the|list (the |all )?files)\b/i, -10, 'lookup'],
+  [/\b(quick(ly)?|simple|small|tiny|just (a|an|the)|one-?liner|minor)\b/i, -10, 'self-described small'],
   [/\b(explain|summari[sz]e|translate|convert|tl;?dr)\b/i, -6, 'explain / transform'],
 ];
+
+// Compound requests ("add X and push it", "screenshot, write the README, then commit") are
+// bigger than any one clause: a trailing chore doesn't make them chores (see `heuristic`).
+const WORK_VERB_RE = /\b(add|create|write|build|make|generate|export|screenshot|install|draft|implement|fix|update|scan|edit|take|set up|deploy|mock up|restyle|rewrite|publish|upload|test)\b/gi;
+const GIT_VERB_RE = /\b(push|commit|sync|merge)\b/gi;
+const CONNECT_RE = /\b(and|then|also|plus|after that)\b|[,;+]/i;
+const CHORE_REASONS = ['git chore', 'lookup', 'self-described small'];
 
 // [min words, points] — first match wins. Longer prompts usually carry more
 // requirements; very short ones are usually follow-ups or one-off asks.
@@ -94,7 +107,7 @@ const LENGTH_POINTS = [
   [121, 12], // multi-paragraph request
   [61, 6],   // detailed ask
   [12, 0],   // ordinary prompt
-  [0, -8],   // terse one-liner
+  [0, -4],   // terse one-liner (was -8: short follow-ups like "yes, apply the edit" still need context)
 ];
 
 function tierForScore(score, th) {
@@ -104,12 +117,32 @@ function thresholdDistance(score, th) { return Math.min(...Object.values(th).map
 
 function heuristic(prompt, th = DEFAULT_CONFIG.thresholds) {
   const reasons = [];
-  let score = 22; // neutral prior ≈ Sonnet territory
-  for (const [re, pts, why] of SIGNALS) {
-    if (re.test(prompt)) { score += pts; reasons.push(`${pts > 0 ? '+' : ''}${pts} ${why}`); }
+  let score = 24; // neutral prior: Sonnet territory. Only an explicit cheap signal (typo, git, lookup) reaches Haiku
+  // Signals read the instruction, not what was pasted after it or the words inside a link
+  // (a job URL containing "strategy" is not a planning request).
+  const head = prompt.replace(/https?:\/\/\S+/g, ' ').slice(0, 600);
+  const hits = SIGNALS.filter(([re]) => re.test(re.source.startsWith('https?') ? prompt : head));
+  const has = why => hits.some(h => h[2] === why);
+
+  const distinct = (re, text) => new Set((text.match(re) || []).map(w => w.toLowerCase()));
+  const workVerbs = distinct(WORK_VERB_RE, head), gitVerbs = distinct(GIT_VERB_RE, head);
+  const nVerbs = workVerbs.size + gitVerbs.size;
+  const compound = nVerbs >= 2 && CONNECT_RE.test(head);
+  // Work beside a chore waives the chore penalty: git/lookup/"small" are the last step, not the task.
+  const workAlongside = workVerbs.size >= 1 && (compound || has('writing / career') || has('url / external page'));
+
+  for (const [re, pts, why] of hits) {
+    if (workAlongside && CHORE_REASONS.includes(why)) { reasons.push(`0 ${why} (waived: part of a bigger request)`); continue; }
+    score += pts; reasons.push(`${pts > 0 ? '+' : ''}${pts} ${why}`);
   }
+  if (compound) {
+    const pts = nVerbs >= 3 ? 10 : 6;
+    score += pts; reasons.push(`+${pts} compound request (${nVerbs} actions)`);
+  }
+
   const words = prompt.trim().split(/\s+/).length;
-  const lenPts = LENGTH_POINTS.find(([min]) => words >= min)[1];
+  let lenPts = LENGTH_POINTS.find(([min]) => words >= min)[1];
+  if (lenPts < 0 && (workVerbs.size >= 1 || hits.some(h => h[1] >= 10))) lenPts = 0; // short but carries real action
   if (lenPts) { score += lenPts; reasons.push(`${lenPts > 0 ? '+' : ''}${lenPts} ${words} words`); }
 
   const files = new Set(prompt.match(/[\w./-]+\.(js|ts|tsx|jsx|py|go|rs|java|rb|swift|kt|c|cpp|h|css|html|md|json|ya?ml|sql|sh)\b/g) || []);
@@ -117,6 +150,12 @@ function heuristic(prompt, th = DEFAULT_CONFIG.thresholds) {
   if (/```|Traceback|Error:|Exception|at .+:\d+:\d+/.test(prompt)) { score += 8; reasons.push('+8 code / stack trace'); }
   const steps = (prompt.match(/^\s*(\d+[.)]|[-*•])\s+/gm) || []).length;
   if (steps >= 3) { score += 10; reasons.push(`+10 ${steps}-step list`); }
+
+  // Writing and career work (resume, cover letter, email) is judged on quality: never Haiku,
+  // unless it is a pure cosmetic fix ("fix the typo in my cover letter").
+  if (has('writing / career') && !has('cosmetic edit') && score < th.sonnet) {
+    score = th.sonnet; reasons.push(`floor ${th.sonnet} writing is never Haiku`);
+  }
 
   score = Math.max(0, Math.min(100, score));
   return { score, key: tierForScore(score, th), reasons, source: 'heuristic' };
@@ -180,7 +219,7 @@ const REQUEST_RE = new RegExp('\\?|\\b(' + [
   'try', 'test', 'use', 'start', 'stop', 'apply', 'revert', 'undo', 'rewrite', 'generate', 'help', 'need',
   'want', "let'?s", 'should', 'could', 'would', 'can', 'will', 'please', 'plz', 'also', 'now', 'next', 'then',
   'but', 'still', 'instead', 'why', 'how', 'what', 'when', 'where', 'which', 'who', 'do', 'go', 'continue',
-  'proceed', 'yes', 'yeah', 'sure',
+  'proceed', 'yes', 'yeah', 'sure', 'give', 'export', 'pdf', 'let', 'prep',
 ].join('|') + ')\\b', 'i');
 
 function isNoTask(prompt) {
@@ -193,8 +232,8 @@ function isNoTask(prompt) {
 // Conversational / meta question ("what would a next step be?", "should we use X?"): short,
 // question-shaped, and no imperative verb up front. Claude just answers; no model picker.
 const CONVO_MAX_WORDS = 40;
-const CONVO_START_RE = /^\s*(what|why|how|should|would|could|is|are|does|do|can you explain|what if|thoughts on)\b/i;
-const IMPERATIVE_RE = /\b(build|make|create|add|fix|implement|write|refactor|update|change|delete|remove|run|deploy|install|set up|rewrite|rename|move|push|commit|merge|generate|edit)\b/i;
+const CONVO_START_RE = /^\s*(what|why|how|should|would|could|is|are|does|do (you|i|we|they)|can you explain|what if|thoughts on)\b/i; // bare "do" is an imperative ("Do this role as well")
+const IMPERATIVE_RE = /\b(build|make|create|add|fix|implement|write|refactor|update|change|delete|remove|run|deploy|install|set up|rewrite|rename|move|push|commit|merge|generate|edit|prep|prepare|draft|give|export|screenshot)\b/i;
 function isConversational(prompt) {
   const text = prompt.trim();
   const words = text.split(/\s+/);
@@ -276,21 +315,22 @@ function routingInstructions(rec, cur, verdict, route, forced, note) {
     `recommended **${rec.label}** (effort: ${rec.effort}). Signals: ${verdict.reasons.join(', ') || 'none'}. ` +
     `Current session model: ${curLabel}.`;
 
-  const delegate =
-    `To run on a model other than the current one, delegate the WHOLE task with the Agent tool ` +
-    `(subagent_type "general-purpose", model "<choice>", run_in_background false). The subagent starts cold, ` +
+  const delegateTo = agent =>
+    `delegate the WHOLE task with the Agent tool ` +
+    `(subagent_type "general-purpose", model "${agent}", run_in_background false). The subagent starts cold, ` +
     `so its prompt must be self-contained: the user's request verbatim, the working directory, and any ` +
-    `relevant facts from this conversation. Then relay its result faithfully. If they choose the current ` +
-    `model, just do the task yourself.`;
+    `relevant facts from this conversation. Then relay its result faithfully.`;
+  const delegate = `To run on a model other than the current one, ${delegateTo('<choice>')} ` +
+    `If they choose the current model, just do the task yourself.`;
+  const sameModel = cur && cur.key === rec.key;
 
   if (forced) {
     return `${header}\nThe user forced model "${rec.key}" with an sm: tag. Do not ask. ` +
-      (cur && cur.key === rec.key ? 'do the task yourself.' : delegate.replace('<choice>', rec.agent));
+      (sameModel ? 'Do the task yourself.' : `To run it, ${delegateTo(rec.agent)}`);
   }
   if (route === 'auto') {
     return `${header}\nSmartModel is routing automatically${note ? ` (${note})` : ''}: do not ask. In one short line tell the user which model ` +
-      `you're routing to and why, then ` +
-      (cur && cur.key === rec.key ? 'do the task yourself.' : delegate.replace('<choice>', rec.agent));
+      `you're routing to and why, then ` + (sameModel ? 'do the task yourself.' : delegateTo(rec.agent));
   }
 
   const ordered = [rec, ...TIERS.filter(t => t.key !== rec.key)];
@@ -328,7 +368,11 @@ async function runHook() {
     return;
   }
 
-  const cur = tierOfModelId(currentModel(data.transcript_path));
+  let cur = tierOfModelId(currentModel(data.transcript_path)), curGuess = false;
+  if (!cur) { // brand-new session: the transcript has no assistant turn yet, so assume the last model seen
+    const last = [...readLog()].reverse().find(e => e.current && !e.curGuess);
+    if (last) { cur = tierByKey[last.current] || null; curGuess = !!cur; }
+  }
   let verdict, rec;
   if (forcedMatch) {
     rec = tierByKey[forcedMatch[1].toLowerCase()];
@@ -338,6 +382,7 @@ async function runHook() {
     rec = tierByKey[verdict.key];
   }
   const entry = { session: data.session_id, current: cur?.key, rec: rec.key, score: verdict.score, source: verdict.source, mode: cfg.mode, prompt: prompt.slice(0, 120) };
+  if (curGuess) entry.curGuess = true;
   Object.assign(entry, escalationOf(data.session_id, prompt, readLog()));
 
   // Mid-task downgrade: handing a follow-up to a cheaper cold subagent costs more than it saves.
@@ -421,8 +466,11 @@ async function runPick() {
     const done = picksById(entries);
     const dec = [...entries].reverse().find(e => e.session === data.session_id && e.id && e.type !== 'pick' && !e.skipped && !done[e.id]);
     if (!dec) return;
+    // "stayed" = kept the current model. That can mean "don't switch" rather than "this needs X",
+    // so calibrate treats it separately from a deliberate choice.
+    const stayed = !!picked && (/·\s*current/i.test(String(raw)) || picked === dec.current);
     log(picked
-      ? { type: 'pick', session: data.session_id, id: dec.id, picked, override: picked !== dec.rec }
+      ? { type: 'pick', session: data.session_id, id: dec.id, picked, override: picked !== dec.rec, stayed }
       : { type: 'pick', session: data.session_id, id: dec.id, picked: 'other', override: true, raw: String(raw).slice(0, 120) });
   } catch {}
 }
@@ -435,7 +483,13 @@ function joinPicks(entries) {
   const decisions = entries.filter(e => e.type !== 'pick' && e.id && !e.skipped);
   return { decisions, joined: decisions.filter(d => picks[d.id]).map(d => ({ ...d, pick: picks[d.id] })) };
 }
+// Older picks have no `stayed` field; infer it from the decision's current model.
+const isStay = d => d.pick.stayed ?? (!!d.current && d.pick.picked === d.current);
+// A stay that disagrees with the recommendation is ambiguous ("don't switch" vs "needs this tier").
+const isAmbiguous = d => isStay(d) && d.pick.picked !== d.rec;
 const overrideRate = joined => joined.length ? Math.round(100 * joined.filter(d => d.pick.picked !== d.rec).length / joined.length) : null;
+const pct = n => n === null || n === undefined ? 'n/a' : n + '%';
+const choiceOverrideRate = joined => overrideRate(joined.filter(d => !isAmbiguous(d)));
 
 function calibrate(apply) {
   const cfg = loadConfig();
@@ -448,14 +502,16 @@ function calibrate(apply) {
       const row = joined.filter(d => d.rec === r);
       if (row.length) lines.push('  ' + r.padEnd(20) + cols.map(c => String(row.filter(d => d.pick.picked === c).length).padStart(6)).join(' '));
     }
-    lines.push(`  override rate ${overrideRate(joined)}% · escalations flagged: ${decisions.filter(d => d.escalation).length}`);
+    const amb = joined.filter(isAmbiguous).length;
+    lines.push(`  override rate ${overrideRate(joined)}% · ${amb} stayed on current model instead (ignored below) · ` +
+      `override rate on deliberate choices ${pct(choiceOverrideRate(joined))} · escalations flagged: ${decisions.filter(d => d.escalation).length}`);
   }
   const th = { ...cfg.thresholds };
   const names = ['sonnet', 'opus', 'fable'];
   const notes = [];
   for (const name of names) {
     const T = cfg.thresholds[name];
-    const near = joined.filter(d => typeof d.score === 'number' && Math.abs(d.score - T) <= CAL_RADIUS && tierByKey[d.pick.picked]);
+    const near = joined.filter(d => typeof d.score === 'number' && Math.abs(d.score - T) <= CAL_RADIUS && tierByKey[d.pick.picked] && !isAmbiguous(d));
     if (near.length < CAL_MIN_SAMPLES) { notes.push(`  ${name} (${T}): ${near.length} picks within ±${CAL_RADIUS}, need ${CAL_MIN_SAMPLES}: no change`); continue; }
     const idx = k => TIER_KEYS.indexOf(k);
     const up = near.filter(d => idx(d.pick.picked) > idx(d.rec)).length;
@@ -515,7 +571,9 @@ async function main() {
   console.log(`SmartModel: ${c.enabled ? 'ON' : 'OFF'} · mode ${c.mode} · ignores prompts < ${c.minChars} chars · ` +
     `classifier ${c.useLLMClassifier && process.env.ANTHROPIC_API_KEY ? 'Haiku (API key found)' : 'heuristic'} · ${readLog().filter(e => e.type !== 'pick').length} decisions logged\n` +
     `  thresholds sonnet ${t.sonnet} / opus ${t.opus} / fable ${t.fable} · margin ${c.margin} · ` +
-    `${joined.length} picks recorded · override rate ${rate === null ? 'n/a' : rate + '%'}`);
+    `${joined.length} picks recorded · override rate ${rate === null ? 'n/a' : rate + '%'}` +
+    ` (${pct(choiceOverrideRate(joined))} excluding stays on the current model)`);
 }
 
-main();
+if (require.main === module) main();
+else module.exports = { heuristic, skipReason, DEFAULT_CONFIG, isConversational, isNoTask, tierForScore };

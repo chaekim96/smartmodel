@@ -9,7 +9,7 @@ SmartModel is a small hook for Claude Code. Before Claude acts on your prompt, i
 ## How it works
 
 1. A `UserPromptSubmit` hook runs `smartmodel.js hook` on every prompt.
-2. The script scores the prompt with a keyword and structure heuristic (instant, offline). If `ANTHROPIC_API_KEY` is set, a Haiku classifier is used instead, with the heuristic as fallback.
+2. The script scores the prompt with a keyword and structure heuristic (instant, offline). If `ANTHROPIC_API_KEY` is set, a Haiku classifier is used instead, with the heuristic as fallback. The heuristic reads only the first 600 characters with URLs stripped, so a pasted job description or a word inside a link doesn't drive the score. It adds points for multi-step requests ("screenshot it, write the README, then push"), writing work (resumes, cover letters, emails) and links to fetch. Small-task penalties (typo, git, lookup) only apply when there's no bigger work in the same prompt.
 3. The score maps to a tier. The hook injects instructions into Claude's context: either "route to this model and say so in one line" or "ask the user which model to use via AskUserQuestion".
 4. To run on a model other than the current one, Claude delegates the whole task to a subagent on that model.
 5. Every decision is appended to a local `decisions.log`.
@@ -56,7 +56,9 @@ Nothing is injected (and the decision is logged as skipped) when:
 
 When a routed decision opens the picker, it gets an id. A `PostToolUse` hook on `AskUserQuestion` runs `smartmodel.js pick` and records which model you chose. `node smartmodel.js calibrate` joins decisions with picks, prints a recommended-versus-picked table, and suggests moving a threshold by 5 points when you consistently pick a higher or lower tier near it (at least 5 samples within 15 points). `calibrate --apply` saves the change.
 
-**Experimental:** recording picks from the live AskUserQuestion answer is built to parse the tool response defensively, but it has not yet been confirmed in a real Claude Code session. The calibrate math itself is exercised in the sample below.
+Each pick is also marked `stayed` when you kept the model you were already on. A stay that disagrees with the recommendation is ambiguous: it can mean "this needs that model" or just "don't switch". So `calibrate` reports those separately and leaves them out when suggesting thresholds.
+
+Pick recording has been confirmed in real Claude Code sessions.
 
 ## Install
 
@@ -89,11 +91,11 @@ All screenshots are real output of `smartmodel.js`, rendered into a terminal-sty
 
 ![classify](docs/classify.png)
 
-**`hook`, confident case: a tiny edit is routed automatically in smart mode (score 2 is 18 points from the nearest cutoff)**
+**`hook`, confident case: a medium task is routed automatically in smart mode (score 30 is 10 points from the nearest cutoff)**
 
 ![hook auto-route](docs/hook-auto.png)
 
-**`hook`, borderline case: score 38 is 7 points below the Opus cutoff, so smart mode tells Claude to ask with a picker**
+**`hook`, borderline case: score 48 is 3 points above the Opus cutoff, so smart mode tells Claude to ask with a picker**
 
 ![hook ask](docs/hook-ask.png)
 
@@ -108,7 +110,7 @@ All screenshots are real output of `smartmodel.js`, rendered into a terminal-sty
 ## Trade-offs
 
 - **A subagent starts cold.** Routing to another model delegates the task to a subagent that does not see your conversation history. That is fine for self-contained tasks. For a follow-up deep in a long thread, switch with `/model` (or use block mode) to keep the context.
-- **The heuristic is not yet validated.** The scoring weights are hand-tuned guesses. There is no benchmark showing it picks the cheapest capable model, which is what `calibrate` is meant to help with over time.
+- **The heuristic is only lightly validated.** The weights were re-tuned against about three weeks of one person's real usage. On 49 hand-labeled real prompts, exact tier matches went from 53% to 80%. That set was also used for tuning, so expect less on new prompts. Work that needs Opus still tends to score just under the Opus cutoff, which means smart mode asks rather than routing.
 - Routing text is injected as context for Claude to follow, so it is an instruction, not a hard guarantee.
 
 ## Privacy
